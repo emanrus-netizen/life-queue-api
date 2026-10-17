@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: life_queue_postgres
+
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: life_queue
+      POSTGRES_PASSWORD: life_queue_dev
+      POSTGRES_DB: life_queue_dev
+
+    ports:
+      - "5434:5432"
+
+    volumes:
+      - life_queue_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  life_queue_postgres_data:

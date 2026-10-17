@@ -1,0 +1,526 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+/**
+ * A real Life Queue account.
+ * IMPORTANT:
+ * We store passwordHash, NEVER the user's
+ * original password.
+ * Email will also be normalized to lowercase
+ * before it reaches Prisma so:
+ * Emmanuel@email.com
+ * and:
+ * emmanuel@email.com
+ * cannot accidentally become two accounts.
+ */
+model User {
+  id String @id @default(cuid())
+
+  email        String @unique
+  passwordHash String
+
+  displayName String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /**
+   * One user may be signed in on multiple devices.
+   * Example:
+   * iPhone
+   * Laptop
+   * Future tablet
+   * Each device can have its own Session.
+   */
+  sessions                 Session[]
+  queueItems               QueueItem[]
+  queueSyncReceipts        QueueSyncReceipt[]
+  lifeRoutines             LifeRoutine[]
+  routineSessions          RoutineSession[]
+  routineSyncReceipts      RoutineSyncReceipt[]
+  schedule                 UserSchedule?
+  userScheduleSyncReceipts UserScheduleSyncReceipt[]
+}
+
+/**
+ * Represents one authenticated login session.
+ * SECURITY:
+ * The phone will eventually hold a random
+ * session secret.
+ * The database will NOT store that raw secret.
+ * Instead:
+ * phone:
+ * abc-super-random-secret
+ * database:
+ * SHA-256 hash of that secret
+ * That means a database leak does not directly
+ * reveal usable session credentials.
+ */
+model Session {
+  id String @id @default(cuid())
+
+  userId String
+
+  tokenHash String @unique
+
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+
+  /**
+   * Connect this session to exactly one user.
+   * If the account is ever deleted,
+   * all sessions belonging to that user
+   * are deleted automatically.
+   */
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /**
+   * Helps PostgreSQL efficiently answer:
+   * "Give me this user's sessions."
+   */
+  @@index([userId])
+  /**
+   * Useful later for cleaning expired sessions.
+   */
+  @@index([expiresAt])
+}
+
+/**
+ * Lifecycle state of a Queue item.
+ * Rest is intentionally NOT represented here.
+ * Rest belongs to Life state, not task state.
+ */
+
+enum QueueItemStatus {
+  ACTIVE
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+/**
+ * User-controlled importance.
+ * Priority influences recommendation scoring,
+ * but it is not the only ranking signal.
+ */
+
+enum QueuePriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+/**
+ * Where/how the task can be performed.
+ */
+enum QueueContext {
+  ANYWHERE
+  HOME
+  WORK
+  COMPUTER
+  PHONE
+  ERRAND
+}
+
+/**
+ * Approximate effort required by the task.
+ */
+enum EnergyLevel {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+/**
+ * One user-owned task inside Life Queue.
+ * This intentionally mirrors the frontend
+ * QueueItem domain model closely so that we
+ * do not end up maintaining two competing
+ * definitions of what a task means.
+ */
+model QueueItem {
+  /**
+   * Stable task identity.
+   * Unlike User/Session IDs, this has no
+   * @default(cuid()) because the frontend may
+   * create tasks while offline.
+   * The same ID can therefore exist:
+   * local cache
+   * ↓
+   * API
+   * ↓
+   * database
+   * without needing ID reconciliation.
+   */
+
+  id String @id
+
+  /**
+   * Ownership.
+   * A QueueItem belongs to exactly one user.
+   */
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title  String
+
+  /**
+   * The current frontend QueueItem uses a
+   * required string for description.
+   * An empty description is represented as "".
+   */
+
+  description String @default("")
+
+  /**
+   * Lifecycle state.
+   */
+  status           QueueItemStatus @default(ACTIVE)
+  /**
+   * User-controlled importance.
+   */
+  priority         QueuePriority   @default(NORMAL)
+  /**
+   * Original duration estimate in minutes.
+   * IMPORTANT:
+   * This remains the original estimate even
+   * if the active timer is later extended.
+   */
+  estimatedMinutes Int?
+
+  /**
+   * Optional task deadline.
+   */
+  dueAt      DateTime?
+  /**
+   * Snooze/defer boundary.
+   * While this is in the future, the task
+   * should not be recommended.
+   */
+  deferUntil DateTime?
+  /**
+   * Where/how the task can be performed.
+   */
+  context    QueueContext @default(ANYWHERE)
+
+  /**
+   * Optional effort requirement.
+   */
+  energy EnergyLevel?
+
+  /**
+   * Actual time the task entered IN_PROGRESS.
+   */
+  startedAt DateTime?
+
+  /**
+   * Current timer endpoint.
+   * This is separate from estimatedMinutes.
+   */
+  timerEndsAt DateTime?
+
+  /**
+   * Actual completion timestamp.
+   */
+  completedAt DateTime?
+
+  /**
+   * When this task was originally created.
+   * Because IDs may originate on-device,
+   * the API should preserve the client's
+   * legitimate creation time when creating
+   * an offline task.
+   */
+  createdAt DateTime
+
+  /**
+   * Server-side mutation timestamp.
+   * This becomes useful for:
+   * - syncing changes
+   * - determining what changed since last sync
+   * - future conflict resolution
+   */
+  updatedAt DateTime @updatedAt
+
+  /**
+   * Common query:
+   * "Give me this user's active/in-progress
+   * tasks."
+   */
+  @@index([userId, status])
+  /**
+   * Useful for incremental sync:
+   * "Give me everything belonging to this user
+   * that changed after timestamp X."
+   */
+  @@index([userId, updatedAt])
+  /**
+   * Useful for stable task ordering/history.
+   */
+  @@index([userId, createdAt])
+}
+
+enum QueueSyncOperationKind {
+  CREATE
+  UPDATE
+  START
+  SNOOZE
+  COMPLETE
+  CANCEL
+  EXTEND
+}
+
+/**
+ * Records Queue mutations that the backend has
+ * already successfully processed.
+ * This is NOT the mobile outbox.
+ * Mobile outbox:
+ * "I still need to send this."
+ * QueueSyncReceipt:
+ * "The server already processed this."
+ * Together they give us safe retry behavior.
+ */
+model QueueSyncReceipt {
+  /**
+   * Generated by the mobile client once for one
+   * logical operation.
+   * Example:
+   * qsync_mx123_abc456
+   * A retry MUST reuse the same operationId.
+   */
+  operationId String
+
+  /**
+   * Ownership comes from the authenticated session.
+   * We never trust a userId sent in request.body.
+   */
+  userId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /**
+   * QueueItem affected by the operation.
+   * We intentionally do NOT create a Prisma
+   * relation to QueueItem here.
+   * The receipt should survive even if a QueueItem
+   * is deleted in a future version.
+   */
+  entityId String
+
+  kind QueueSyncOperationKind
+
+  /**
+   * SHA-256 fingerprint of the exact logical
+   * mutation.
+   * This protects against someone accidentally
+   * doing:
+   * same operationId
+   * + different payload
+   * which must NOT count as a valid retry.
+   */
+  requestHash String
+
+  /**
+   * When the user originally performed the action.
+   * Important for offline replay.
+   */
+  occurredAt DateTime
+
+  /**
+   * When PostgreSQL successfully accepted it.
+   */
+  appliedAt DateTime @default(now())
+
+  /**
+   * operationId only needs to be unique inside
+   * one authenticated account.
+   * Account A and Account B may coincidentally
+   * generate the same random ID without leaking
+   * information across accounts.
+   */
+  @@id([userId, operationId])
+  @@index([userId, entityId, appliedAt])
+  @@index([userId, appliedAt])
+}
+
+enum RoutineTimePreference {
+  ANYTIME
+  MORNING
+  AFTERNOON
+  EVENING
+}
+
+enum RoutineSessionStatus {
+  IN_PROGRESS
+  COMPLETED
+}
+
+model RoutineSession {
+  id          String               @id
+  userId      String
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  routineId   String
+  routine     LifeRoutine          @relation(fields: [routineId], references: [id])
+  status      RoutineSessionStatus @default(IN_PROGRESS)
+  startedAt   DateTime
+  timerEndsAt DateTime?
+  completedAt DateTime?
+  updatedAt   DateTime             @updatedAt
+
+  @@index([userId, startedAt])
+  @@index([userId, updatedAt])
+  @@index([routineId, startedAt])
+}
+
+model LifeRoutine {
+  id                    String                @id
+  userId                String
+  user                  User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name                  String
+  description           String?
+  targetSessionsPerWeek Int                   @default(3)
+  preferredMinutes      Int                   @default(30)
+  preferredTime         RoutineTimePreference @default(ANYTIME)
+  context               QueueContext          @default(ANYWHERE)
+  energy                EnergyLevel?
+  isActive              Boolean
+  createdAt             DateTime
+  sessions              RoutineSession[]
+  /**
+   * Server-maintained mutation timestamp,
+   * useful for incremental cloud sync.
+   */
+  updatedAt             DateTime              @updatedAt
+
+  /**
+   * Supports a compound foreign key from
+   * RoutineSession, enforcing matching ownership.
+   */
+  @@unique([id, userId])
+  @@index([userId, isActive])
+  @@index([userId, updatedAt])
+}
+
+/**
+ * Every kind of Routine mutation that the
+ * offline sync system can deliver.
+ * Routine activation/deactivation is handled
+ * through UPDATE_ROUTINE.
+ */
+enum RoutineSyncOperationKind {
+  CREATE_ROUTINE
+  UPDATE_ROUTINE
+  START_SESSION
+  EXTEND_SESSION
+  COMPLETE_SESSION
+}
+
+/**
+ * A receipt proves that PostgreSQL has already
+ * successfully applied one logical operation.
+ * Phone outbox:
+ * "This action still needs delivery."
+ * Server receipt:
+ * "This action was already applied."
+ * Both use the same operationId.
+ */
+model RoutineSyncReceipt {
+  /**
+   * Created ONCE on the device.
+   * Retries must reuse the same ID.
+   */
+  operationId String
+
+  /**
+   * Ownership must come from the verified
+   * session, never from request.body.userId.
+   */
+  userId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /**
+   * Routine ID for CREATE/UPDATE.
+   * Session ID for START/EXTEND/COMPLETE.
+   */
+  entityId String
+
+  kind RoutineSyncOperationKind
+
+  /**
+   * Server-generated SHA-256 fingerprint
+   * of the logical operation.
+   * The same operationId with a different
+   * payload must be rejected.
+   */
+  requestHash String
+
+  /**
+   * When the action actually occurred
+   * on the user's device.
+   */
+  occurredAt DateTime
+
+  /**
+   * When the database accepted it.
+   */
+  appliedAt DateTime @default(now())
+
+  /**
+   * Store the original successful response,
+   * allowing retries to receive the same ACK.
+   * Serialize dates as ISO strings before
+   * storing them in JSON.
+   */
+  responseJson Json
+
+  /**
+   * Same operation ID may exist in different
+   * accounts without a collision.
+   */
+  @@id([userId, operationId])
+  @@index([userId, entityId, appliedAt])
+  @@index([userId, appliedAt])
+}
+
+model UserSchedule {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  wakeTime      String
+  workStartTime String?
+  workEndTime   String?
+  sleepTime     String
+
+  timeZone String @default("Asia/Manila")
+
+  // Protect against an old device overwriting
+  // changes made on another device.
+  version Int @default(1)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model UserScheduleSyncReceipt {
+  id String @id @default(cuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  operationId  String
+  requestHash  String
+  responseJson Json
+
+  appliedAt DateTime @default(now())
+
+  @@unique([userId, operationId])
+  @@index([userId, appliedAt])
+}

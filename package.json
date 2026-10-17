@@ -1,0 +1,48 @@
+{
+  "name": "life-queue-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:auth && npm run test:queue && npm run test:queue-sync && npm run test:routine && npm run test:security && npm run test:middleware",
+    "test:routine": "tsx src/routine/routine-security-self-test.ts",
+    "test:security": "tsx src/auth/auth-security-self-test.ts",
+    "test:auth": "tsx src/auth/auth-self-test.ts",
+    "test:queue-sync": "tsx src/queue/queue-sync-self-test.ts",
+    "test:queue": "tsx src/queue/queue-security-self-test.ts",
+    "test:middleware": "tsx src/dev/api-middleware-self-test",
+    "prisma:validate": "npx prisma validate",
+    "prisma:generate": "npx prisma generate",
+    "prisma:migrate": "npx prisma migrate dev",
+    "prisma:studio": "npx prisma studio"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.4",
+    "@types/supertest": "^7.2.1",
+    "prisma": "^7.10.0",
+    "supertest": "^7.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.5",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.1",
+    "helmet": "^8.3.0",
+    "pg": "^8.23.1",
+    "zod": "^4.6.5"
+  }
+}
